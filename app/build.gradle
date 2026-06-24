@@ -3,14 +3,14 @@ plugins {
 }
 
 android {
-    namespace "com.secondthought.chatgptprotools"
+    namespace "com.secondthought.chatexporthelper"
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.secondthought.chatgptprotools"
+        applicationId "com.secondthought.chatexporthelper.v3"
         minSdk 23
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 3
+        versionName "3.0-test"
     }
 }
