@@ -6,7 +6,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.Context;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -55,6 +54,7 @@ public class MainActivity extends Activity {
     private String pendingExportFileName = "chat-export.txt";
     private ImportBatch currentImportBatch;
     private boolean waitingForWebViewExtraction = false;
+    private String lastLoadedShareLink = "";
 
     private static class ChatRecord {
         String id;
@@ -118,7 +118,7 @@ public class MainActivity extends Activity {
         layout.addView(title);
 
         TextView intro = new TextView(this);
-        intro.setText("Import ChatGPT share links, save chats locally, search your archive, and export text files. Paste still works as a fallback when a share page cannot be read.");
+        intro.setText("Import ChatGPT share links, save chats locally, search your archive, and export text files. If automatic import only shows menu text, wait for the share page below to load and tap Extract visible page now.");
         intro.setTextSize(16);
         intro.setPadding(0, dp(12), 0, dp(16));
         layout.addView(intro);
@@ -144,9 +144,35 @@ public class MainActivity extends Activity {
         layout.addView(linkInput, matchWrap());
 
         Button importButton = new Button(this);
-        importButton.setText("Import and save link(s)");
+        importButton.setText("Load/import share link(s)");
         importButton.setOnClickListener(v -> importFromShareLinks());
         layout.addView(importButton);
+
+        Button extractButton = new Button(this);
+        extractButton.setText("Extract visible page now");
+        extractButton.setOnClickListener(v -> extractVisiblePageManually());
+        layout.addView(extractButton);
+
+        TextView webViewNote = new TextView(this);
+        webViewNote.setText("Share page preview. If you can see the conversation here, tap Extract visible page now. If you only see menus, the shared page is not rendering inside this app yet.");
+        webViewNote.setTextSize(14);
+        webViewNote.setPadding(0, dp(8), 0, dp(8));
+        layout.addView(webViewNote);
+
+        importWebView = new WebView(this);
+        WebSettings settings = importWebView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setLoadsImagesAutomatically(false);
+        settings.setLoadWithOverviewMode(true);
+        settings.setUseWideViewPort(true);
+        settings.setBuiltInZoomControls(true);
+        settings.setDisplayZoomControls(false);
+        settings.setUserAgentString("Mozilla/5.0 (Linux; Android 13; Samsung Tablet) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36");
+        layout.addView(importWebView, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(420)
+        ));
 
         searchInput = new EditText(this);
         searchInput.setHint("Search saved chats, e.g. belonging compassion KDP");
@@ -213,13 +239,6 @@ public class MainActivity extends Activity {
         libraryText.setPadding(0, dp(16), 0, 0);
         layout.addView(libraryText);
 
-        importWebView = new WebView(this);
-        WebSettings settings = importWebView.getSettings();
-        settings.setJavaScriptEnabled(true);
-        settings.setDomStorageEnabled(true);
-        settings.setLoadsImagesAutomatically(false);
-        layout.addView(importWebView, new LinearLayout.LayoutParams(1, 1));
-
         setContentView(scrollView);
         searchSavedChats();
     }
@@ -264,7 +283,7 @@ public class MainActivity extends Activity {
         batch.manualTitle = titleInput.getText().toString().trim();
         batch.tags = tagsInput.getText().toString().trim();
         currentImportBatch = batch;
-        setStatus("Rendering " + links.size() + " share link(s)...");
+        setStatus("Loading " + links.size() + " share link(s). Watch the preview below.");
         processNextShareLink();
     }
 
@@ -278,8 +297,9 @@ public class MainActivity extends Activity {
 
         int thisIndex = currentImportBatch.index;
         String link = currentImportBatch.links.get(thisIndex);
+        lastLoadedShareLink = link;
         waitingForWebViewExtraction = true;
-        setStatus("Rendering share link " + (thisIndex + 1) + " of " + currentImportBatch.links.size() + "...");
+        setStatus("Loading share link " + (thisIndex + 1) + " of " + currentImportBatch.links.size() + " in preview...");
 
         importWebView.setWebViewClient(new WebViewClient() {
             @Override
@@ -289,9 +309,9 @@ public class MainActivity extends Activity {
                             && currentImportBatch.index == thisIndex
                             && waitingForWebViewExtraction) {
                         waitingForWebViewExtraction = false;
-                        extractRenderedSharePage();
+                        extractRenderedSharePage(false);
                     }
-                }, 3500);
+                }, 5000);
             }
 
             @Override
@@ -312,54 +332,76 @@ public class MainActivity extends Activity {
         importWebView.loadUrl(link);
     }
 
-    private void extractRenderedSharePage() {
-        if (currentImportBatch == null) return;
+    private void extractVisiblePageManually() {
+        String source = lastLoadedShareLink.length() > 0 ? lastLoadedShareLink : linkInput.getText().toString().trim();
+        if (source.length() == 0) {
+            showToast("Load a share link first");
+            return;
+        }
+        setStatus("Extracting currently visible page...");
+        extractRenderedSharePage(true);
+    }
 
+    private void extractRenderedSharePage(boolean manual) {
         String script = "(function(){"
                 + "function clean(s){return (s||'').replace(/\\n{3,}/g,'\\n\\n').trim();}"
                 + "var parts=[];"
-                + "var nodes=document.querySelectorAll('[data-message-author-role], article');"
-                + "for(var i=0;i<nodes.length;i++){var t=clean(nodes[i].innerText);if(t&&parts.indexOf(t)===-1){parts.push(t);}}"
+                + "var selectors=['[data-message-author-role]','article','main [class*=message]','main div'];"
+                + "for(var s=0;s<selectors.length;s++){"
+                + "var nodes=document.querySelectorAll(selectors[s]);"
+                + "for(var i=0;i<nodes.length;i++){var t=clean(nodes[i].innerText);if(t&&t.length>40&&parts.indexOf(t)===-1){parts.push(t);}}"
+                + "if(parts.length>1){break;}"
+                + "}"
                 + "var text=parts.join('\\n\\n---\\n\\n');"
                 + "if(text.length<100){var main=document.querySelector('main');text=clean((main?main.innerText:(document.body?document.body.innerText:'')));}"
                 + "return JSON.stringify({title:document.title||'',text:text||'',url:location.href||''});"
                 + "})()";
 
         importWebView.evaluateJavascript(script, value -> {
-            if (currentImportBatch == null) return;
-            String link = currentImportBatch.links.get(currentImportBatch.index);
             try {
                 String decoded = jsonUnquote(value);
                 JSONObject object = new JSONObject(decoded);
                 String renderedTitle = cleanTitle(object.optString("title"));
                 String renderedText = cleanRenderedShareText(object.optString("text"));
+                String sourceLink = object.optString("url");
+                if (sourceLink.length() == 0) {
+                    sourceLink = lastLoadedShareLink.length() > 0 ? lastLoadedShareLink : linkInput.getText().toString().trim();
+                }
 
-                if (renderedText.length() < 50) {
-                    currentImportBatch.errors.append("Share page rendered, but conversation text was not available for ")
-                            .append(link)
-                            .append(". Try opening the share link in the browser and checking it is public.\n");
-                } else {
-                    String title = currentImportBatch.manualTitle.length() > 0 && currentImportBatch.links.size() == 1
-                            ? currentImportBatch.manualTitle
-                            : renderedTitle.length() > 0 ? renderedTitle : "Imported chat";
-
-                    saveChatRecord(title, currentImportBatch.tags, link, renderedText);
-                    currentImportBatch.savedCount++;
-                    if (currentImportBatch.firstText.length() == 0) {
-                        currentImportBatch.firstText = renderedText;
-                        currentImportBatch.firstTitle = title;
+                if (renderedText.length() < 80 || looksLikeOnlyPageChrome(renderedText)) {
+                    String message = "The visible page did not contain enough conversation text. If the preview below only shows menus, open the share link in the normal browser and check the conversation is public.";
+                    if (manual) {
+                        setStatus(message);
+                    } else if (currentImportBatch != null) {
+                        currentImportBatch.errors.append(message).append("\n");
                     }
+                } else {
+                    String manualTitle = titleInput.getText().toString().trim();
+                    String title = manualTitle.length() > 0 ? manualTitle : renderedTitle.length() > 0 ? renderedTitle : "Imported chat";
+                    String tags = tagsInput.getText().toString().trim();
+                    saveChatRecord(title, tags, sourceLink, renderedText);
+                    chatInput.setText(renderedText);
+                    titleInput.setText(title);
+                    chatInput.setSelection(chatInput.getText().length());
+                    setStatus("Extracted and saved visible page: " + title);
+
+                    if (currentImportBatch != null) {
+                        currentImportBatch.savedCount++;
+                        if (currentImportBatch.firstText.length() == 0) {
+                            currentImportBatch.firstText = renderedText;
+                            currentImportBatch.firstTitle = title;
+                        }
+                    }
+                    searchSavedChats();
                 }
             } catch (Exception e) {
-                currentImportBatch.errors.append("Import failed for ")
-                        .append(link)
-                        .append(": ")
-                        .append(e.getMessage())
-                        .append("\n");
+                setStatus("Extraction failed: " + e.getMessage());
             }
 
-            currentImportBatch.index++;
-            processNextShareLink();
+            if (!manual && currentImportBatch != null) {
+                currentImportBatch.index++;
+                processNextShareLink();
+            }
         });
     }
 
@@ -376,12 +418,26 @@ public class MainActivity extends Activity {
             chatInput.setSelection(chatInput.getText().length());
         }
 
-        setStatus("Imported and saved " + batch.savedCount + " chat(s)." + (batch.errors.length() > 0 ? " Some links need review." : ""));
+        setStatus("Imported and saved " + batch.savedCount + " chat(s)." + (batch.errors.length() > 0 ? " Some links need manual review." : ""));
         searchSavedChats();
 
         if (batch.errors.length() > 0) {
             libraryText.setText(batch.errors.toString().trim() + "\n\n" + libraryText.getText().toString());
         }
+    }
+
+    private boolean looksLikeOnlyPageChrome(String text) {
+        String normalised = normaliseSearchText(text);
+        boolean hasMenu = normalised.contains("voice")
+                || normalised.contains("terms privacy policy")
+                || normalised.contains("new chat")
+                || normalised.contains("log in")
+                || normalised.contains("sign up");
+        boolean hasConversationClues = normalised.contains("user")
+                || normalised.contains("assistant")
+                || normalised.contains("you asked")
+                || normalised.length() > 800;
+        return hasMenu && !hasConversationClues;
     }
 
     private String cleanRenderedShareText(String text) {
@@ -548,7 +604,7 @@ public class MainActivity extends Activity {
         if (value == null) return "";
         String text = Normalizer.normalize(value, Normalizer.Form.NFD);
         text = text.replaceAll("\\p{M}+", "");
-        text = text.replace('’', '\'').replace('‘', '\'').replace('“', '"').replace('”', '"');
+        text = text.replace("’", "'").replace("‘", "'").replace("“", "\"").replace("”", "\"");
         text = text.toLowerCase(Locale.UK);
         text = text.replaceAll("[^\\p{L}\\p{N}]+", " ");
         return text.replaceAll("\\s+", " ").trim();
@@ -763,7 +819,7 @@ public class MainActivity extends Activity {
 
     private void copyText() {
         String text = cleanText(chatInput.getText().toString());
-        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
         clipboard.setPrimaryClip(ClipData.newPlainText("chat-export", text));
         showToast("Copied");
     }
