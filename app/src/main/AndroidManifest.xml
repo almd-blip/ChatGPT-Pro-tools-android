@@ -8,7 +8,7 @@
         android:allowBackup="true"
         android:supportsRtl="true">
         <activity
-            android:name=".MainActivity"
+            android:name="com.secondthought.chatgptprotools.MainActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
