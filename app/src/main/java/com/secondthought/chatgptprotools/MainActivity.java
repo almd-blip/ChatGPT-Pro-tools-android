@@ -31,6 +31,7 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.text.Normalizer;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -148,7 +149,7 @@ public class MainActivity extends Activity {
         layout.addView(importButton);
 
         searchInput = new EditText(this);
-        searchInput.setHint("Search saved chats");
+        searchInput.setHint("Search saved chats, e.g. belonging compassion KDP");
         searchInput.setSingleLine(true);
         searchInput.setTextSize(16);
         layout.addView(searchInput, matchWrap());
@@ -472,34 +473,68 @@ public class MainActivity extends Activity {
 
     private void searchSavedChats() {
         try {
-            String query = searchInput == null ? "" : searchInput.getText().toString().trim().toLowerCase(Locale.UK);
+            String rawQuery = searchInput == null ? "" : searchInput.getText().toString().trim();
+            String normalisedQuery = normaliseSearchText(rawQuery);
+            String[] terms = normalisedQuery.length() == 0 ? new String[0] : normalisedQuery.split(" ");
+
             JSONArray index = readIndex();
             lastSearchResults.clear();
             StringBuilder display = new StringBuilder();
             display.append("Saved chats: ").append(index.length()).append("\n");
+            display.append("Search checks title, tags, date, and full saved chat text. Multiple words can appear anywhere in the same saved chat.\n");
 
+            int unreadableCount = 0;
             for (int i = index.length() - 1; i >= 0; i--) {
                 ChatRecord record = ChatRecord.fromJson(index.getJSONObject(i));
-                String text = readChatText(record);
-                String haystack = (record.title + " " + record.tags + " " + record.date + " " + text).toLowerCase(Locale.UK);
-                if (query.length() == 0 || haystack.contains(query)) {
+                String text;
+                try {
+                    text = readChatText(record);
+                } catch (Exception readError) {
+                    unreadableCount++;
+                    continue;
+                }
+                String haystack = normaliseSearchText(record.title + " " + record.tags + " " + record.date + " " + text);
+                if (terms.length == 0 || matchesAllTerms(haystack, terms)) {
                     lastSearchResults.add(record);
                 }
             }
 
-            display.append("Matching results: ").append(lastSearchResults.size()).append("\n\n");
+            if (terms.length > 0 && chatInput != null) {
+                String currentText = chatInput.getText().toString();
+                String currentHaystack = normaliseSearchText(titleInput.getText().toString() + " " + tagsInput.getText().toString() + " " + currentText);
+                if (currentText.trim().length() > 0 && matchesAllTerms(currentHaystack, terms)) {
+                    display.append("\nCurrent text box also matches your search. Save it locally if you want it to appear as an archive result.\n");
+                }
+            }
+
+            display.append("\nMatching results: ").append(lastSearchResults.size()).append("\n\n");
             int limit = Math.min(lastSearchResults.size(), 10);
             for (int i = 0; i < limit; i++) {
                 ChatRecord record = lastSearchResults.get(i);
+                String text = "";
+                try {
+                    text = readChatText(record);
+                } catch (Exception ignored) {
+                    text = "";
+                }
                 display.append(i + 1).append(". ").append(record.title).append("\n")
                         .append("   ").append(record.date).append("\n");
                 if (record.tags.length() > 0) {
                     display.append("   Tags: ").append(record.tags).append("\n");
                 }
+                if (terms.length > 0) {
+                    display.append("   Match: ").append(makeSnippet(record.title + "\n" + record.tags + "\n" + text, terms)).append("\n");
+                }
                 display.append("\n");
             }
             if (lastSearchResults.size() > 10) {
-                display.append("Showing first 10 results. Refine your search to narrow it down.");
+                display.append("Showing first 10 results. Refine your search to narrow it down.\n");
+            }
+            if (terms.length > 0 && lastSearchResults.isEmpty()) {
+                display.append("No saved chat matched every search word. Try one distinctive word first, then add more words.\n");
+            }
+            if (unreadableCount > 0) {
+                display.append("Skipped ").append(unreadableCount).append(" saved item(s) that could not be read.\n");
             }
             libraryText.setText(display.toString());
         } catch (Exception e) {
@@ -507,6 +542,50 @@ public class MainActivity extends Activity {
                 libraryText.setText("Could not read saved chats: " + e.getMessage());
             }
         }
+    }
+
+    private String normaliseSearchText(String value) {
+        if (value == null) return "";
+        String text = Normalizer.normalize(value, Normalizer.Form.NFD);
+        text = text.replaceAll("\\p{M}+", "");
+        text = text.replace('’', '\'').replace('‘', '\'').replace('“', '"').replace('”', '"');
+        text = text.toLowerCase(Locale.UK);
+        text = text.replaceAll("[^\\p{L}\\p{N}]+", " ");
+        return text.replaceAll("\\s+", " ").trim();
+    }
+
+    private boolean matchesAllTerms(String haystack, String[] terms) {
+        if (terms.length == 0) return true;
+        for (String term : terms) {
+            if (term == null || term.trim().length() == 0) continue;
+            if (!haystack.contains(term)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private String makeSnippet(String source, String[] terms) {
+        if (source == null) return "";
+        String[] lines = source.split("\\n");
+        for (String line : lines) {
+            String cleaned = cleanText(line);
+            if (cleaned.length() == 0) continue;
+            String normalisedLine = normaliseSearchText(cleaned);
+            for (String term : terms) {
+                if (term != null && term.length() > 0 && normalisedLine.contains(term)) {
+                    return shorten(cleaned, 180);
+                }
+            }
+        }
+        return shorten(cleanText(source), 180);
+    }
+
+    private String shorten(String value, int maxLength) {
+        if (value == null) return "";
+        String cleaned = cleanText(value);
+        if (cleaned.length() <= maxLength) return cleaned;
+        return cleaned.substring(0, maxLength).trim() + "...";
     }
 
     private void loadLatestSavedChat() {
