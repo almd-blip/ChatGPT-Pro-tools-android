@@ -10,9 +10,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.graphics.Typeface;
 import android.net.Uri;
-import android.text.Html;
 import android.view.Gravity;
 import android.view.ViewGroup;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.LinearLayout;
@@ -27,18 +29,12 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
-import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.LinkedHashSet;
 import java.util.Locale;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
     private static final int CREATE_DOCUMENT_REQUEST_CODE = 1001;
@@ -50,11 +46,14 @@ public class MainActivity extends Activity {
     private EditText chatInput;
     private TextView statusText;
     private TextView libraryText;
+    private WebView importWebView;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final ArrayList<ChatRecord> lastSearchResults = new ArrayList<>();
     private String pendingExportText = "";
     private String pendingExportFileName = "chat-export.txt";
+    private ImportBatch currentImportBatch;
+    private boolean waitingForWebViewExtraction = false;
 
     private static class ChatRecord {
         String id;
@@ -85,6 +84,17 @@ public class MainActivity extends Activity {
             object.put("fileName", fileName);
             return object;
         }
+    }
+
+    private static class ImportBatch {
+        ArrayList<String> links;
+        int index = 0;
+        int savedCount = 0;
+        String manualTitle;
+        String tags;
+        String firstText = "";
+        String firstTitle = "";
+        StringBuilder errors = new StringBuilder();
     }
 
     @Override
@@ -202,8 +212,23 @@ public class MainActivity extends Activity {
         libraryText.setPadding(0, dp(16), 0, 0);
         layout.addView(libraryText);
 
+        importWebView = new WebView(this);
+        WebSettings settings = importWebView.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setLoadsImagesAutomatically(false);
+        layout.addView(importWebView, new LinearLayout.LayoutParams(1, 1));
+
         setContentView(scrollView);
         searchSavedChats();
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (importWebView != null) {
+            importWebView.destroy();
+        }
+        super.onDestroy();
     }
 
     private LinearLayout.LayoutParams matchWrap() {
@@ -233,129 +258,161 @@ public class MainActivity extends Activity {
             return;
         }
 
-        String manualTitle = titleInput.getText().toString().trim();
-        String tags = tagsInput.getText().toString().trim();
-        setStatus("Importing " + links.size() + " link(s)...");
-
-        new Thread(() -> {
-            int savedCount = 0;
-            String firstText = "";
-            String firstTitle = "";
-            StringBuilder errors = new StringBuilder();
-
-            for (String link : links) {
-                try {
-                    String html = fetchUrl(link);
-                    String extracted = extractConversationText(html);
-                    if (extracted.trim().length() == 0) {
-                        extracted = "Imported page, but conversation text could not be confidently extracted.\n\nSource: " + link;
-                    }
-
-                    String derivedTitle = extractHtmlTitle(html);
-                    String title = manualTitle.length() > 0 && links.size() == 1
-                            ? manualTitle
-                            : derivedTitle.length() > 0 ? derivedTitle : "Imported chat";
-
-                    String finalText = cleanText(extracted);
-                    saveChatRecord(title, tags, link, finalText);
-                    savedCount++;
-                    if (firstText.length() == 0) {
-                        firstText = finalText;
-                        firstTitle = title;
-                    }
-                } catch (Exception e) {
-                    errors.append("Import failed for ").append(link).append(": ").append(e.getMessage()).append("\n");
-                }
-            }
-
-            int finalSavedCount = savedCount;
-            String finalFirstText = firstText;
-            String finalFirstTitle = firstTitle;
-            String finalErrors = errors.toString().trim();
-
-            mainHandler.post(() -> {
-                if (finalFirstText.length() > 0) {
-                    chatInput.setText(finalFirstText);
-                    titleInput.setText(finalFirstTitle);
-                    chatInput.setSelection(chatInput.getText().length());
-                }
-                setStatus("Imported and saved " + finalSavedCount + " chat(s)." + (finalErrors.length() > 0 ? " Some links failed." : ""));
-                if (finalErrors.length() > 0) {
-                    libraryText.setText(finalErrors);
-                }
-                searchSavedChats();
-            });
-        }).start();
+        ImportBatch batch = new ImportBatch();
+        batch.links = links;
+        batch.manualTitle = titleInput.getText().toString().trim();
+        batch.tags = tagsInput.getText().toString().trim();
+        currentImportBatch = batch;
+        setStatus("Rendering " + links.size() + " share link(s)...");
+        processNextShareLink();
     }
 
-    private String fetchUrl(String urlString) throws Exception {
-        URL url = new URL(urlString);
-        HttpURLConnection connection = (HttpURLConnection) url.openConnection();
-        connection.setInstanceFollowRedirects(true);
-        connection.setConnectTimeout(15000);
-        connection.setReadTimeout(30000);
-        connection.setRequestProperty("User-Agent", "Mozilla/5.0 Android Chat Export Helper");
-        connection.setRequestProperty("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8");
+    private void processNextShareLink() {
+        if (currentImportBatch == null) return;
 
-        int code = connection.getResponseCode();
-        InputStream stream = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
-        if (stream == null) {
-            throw new Exception("No response from server");
+        if (currentImportBatch.index >= currentImportBatch.links.size()) {
+            finishImportBatch();
+            return;
         }
 
-        BufferedReader reader = new BufferedReader(new InputStreamReader(stream, "UTF-8"));
+        int thisIndex = currentImportBatch.index;
+        String link = currentImportBatch.links.get(thisIndex);
+        waitingForWebViewExtraction = true;
+        setStatus("Rendering share link " + (thisIndex + 1) + " of " + currentImportBatch.links.size() + "...");
+
+        importWebView.setWebViewClient(new WebViewClient() {
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                mainHandler.postDelayed(() -> {
+                    if (currentImportBatch != null
+                            && currentImportBatch.index == thisIndex
+                            && waitingForWebViewExtraction) {
+                        waitingForWebViewExtraction = false;
+                        extractRenderedSharePage();
+                    }
+                }, 3500);
+            }
+
+            @Override
+            public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+                if (currentImportBatch != null && waitingForWebViewExtraction) {
+                    waitingForWebViewExtraction = false;
+                    currentImportBatch.errors.append("Import failed for ")
+                            .append(failingUrl)
+                            .append(": ")
+                            .append(description)
+                            .append("\n");
+                    currentImportBatch.index++;
+                    processNextShareLink();
+                }
+            }
+        });
+
+        importWebView.loadUrl(link);
+    }
+
+    private void extractRenderedSharePage() {
+        if (currentImportBatch == null) return;
+
+        String script = "(function(){"
+                + "function clean(s){return (s||'').replace(/\\n{3,}/g,'\\n\\n').trim();}"
+                + "var parts=[];"
+                + "var nodes=document.querySelectorAll('[data-message-author-role], article');"
+                + "for(var i=0;i<nodes.length;i++){var t=clean(nodes[i].innerText);if(t&&parts.indexOf(t)===-1){parts.push(t);}}"
+                + "var text=parts.join('\\n\\n---\\n\\n');"
+                + "if(text.length<100){var main=document.querySelector('main');text=clean((main?main.innerText:(document.body?document.body.innerText:'')));}"
+                + "return JSON.stringify({title:document.title||'',text:text||'',url:location.href||''});"
+                + "})()";
+
+        importWebView.evaluateJavascript(script, value -> {
+            if (currentImportBatch == null) return;
+            String link = currentImportBatch.links.get(currentImportBatch.index);
+            try {
+                String decoded = jsonUnquote(value);
+                JSONObject object = new JSONObject(decoded);
+                String renderedTitle = cleanTitle(object.optString("title"));
+                String renderedText = cleanRenderedShareText(object.optString("text"));
+
+                if (renderedText.length() < 50) {
+                    currentImportBatch.errors.append("Share page rendered, but conversation text was not available for ")
+                            .append(link)
+                            .append(". Try opening the share link in the browser and checking it is public.\n");
+                } else {
+                    String title = currentImportBatch.manualTitle.length() > 0 && currentImportBatch.links.size() == 1
+                            ? currentImportBatch.manualTitle
+                            : renderedTitle.length() > 0 ? renderedTitle : "Imported chat";
+
+                    saveChatRecord(title, currentImportBatch.tags, link, renderedText);
+                    currentImportBatch.savedCount++;
+                    if (currentImportBatch.firstText.length() == 0) {
+                        currentImportBatch.firstText = renderedText;
+                        currentImportBatch.firstTitle = title;
+                    }
+                }
+            } catch (Exception e) {
+                currentImportBatch.errors.append("Import failed for ")
+                        .append(link)
+                        .append(": ")
+                        .append(e.getMessage())
+                        .append("\n");
+            }
+
+            currentImportBatch.index++;
+            processNextShareLink();
+        });
+    }
+
+    private void finishImportBatch() {
+        ImportBatch batch = currentImportBatch;
+        currentImportBatch = null;
+        waitingForWebViewExtraction = false;
+
+        if (batch == null) return;
+
+        if (batch.firstText.length() > 0) {
+            chatInput.setText(batch.firstText);
+            titleInput.setText(batch.firstTitle);
+            chatInput.setSelection(chatInput.getText().length());
+        }
+
+        setStatus("Imported and saved " + batch.savedCount + " chat(s)." + (batch.errors.length() > 0 ? " Some links need review." : ""));
+        searchSavedChats();
+
+        if (batch.errors.length() > 0) {
+            libraryText.setText(batch.errors.toString().trim() + "\n\n" + libraryText.getText().toString());
+        }
+    }
+
+    private String cleanRenderedShareText(String text) {
+        String cleaned = cleanText(text);
+        String lower = cleaned.toLowerCase(Locale.UK);
+        if (lower.contains("window.__reactroutercontext")
+                || lower.contains("__react_query_cache__")
+                || lower.contains("mappedeventname")
+                || lower.contains("webpack")) {
+            return "";
+        }
+
         StringBuilder builder = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null) {
-            builder.append(line).append('\n');
+        String[] lines = cleaned.split("\\n");
+        for (String line : lines) {
+            String trimmed = line.trim();
+            String l = trimmed.toLowerCase(Locale.UK);
+            if (trimmed.length() == 0) continue;
+            if (l.equals("chatgpt") || l.equals("log in") || l.equals("sign up") || l.equals("new chat") || l.equals("share")) continue;
+            if (l.startsWith("here's a chat someone thought")) continue;
+            if (builder.length() > 0) builder.append("\n");
+            builder.append(trimmed);
         }
-        reader.close();
-
-        if (code >= 400) {
-            throw new Exception("Server returned HTTP " + code);
-        }
-        return builder.toString();
+        return cleanText(builder.toString());
     }
 
-    private String extractConversationText(String html) {
-        LinkedHashSet<String> parts = new LinkedHashSet<>();
-
-        addRegexMatches(parts, html, "\\\"parts\\\"\\s*:\\s*\\[(\\\"(?:\\\\.|[^\\\"\\\\])*\\\")\\]");
-        addRegexMatches(parts, html, "\"parts\"\\s*:\\s*\\[(\"(?:\\\\.|[^\"\\\\])*\")\\]");
-        addRegexMatches(parts, html, "\\\"text\\\"\\s*:\\s*(\\\"(?:\\\\.|[^\\\"\\\\])*\\\")");
-        addRegexMatches(parts, html, "\"text\"\\s*:\\s*(\"(?:\\\\.|[^\"\\\\])*\")");
-
-        ArrayList<String> cleanedParts = new ArrayList<>();
-        for (String part : parts) {
-            String decoded = jsonUnquote(part);
-            decoded = cleanText(decoded);
-            if (looksLikeConversationText(decoded)) {
-                cleanedParts.add(decoded);
-            }
-        }
-
-        if (!cleanedParts.isEmpty()) {
-            StringBuilder builder = new StringBuilder();
-            for (String part : cleanedParts) {
-                if (builder.length() > 0) {
-                    builder.append("\n\n---\n\n");
-                }
-                builder.append(part);
-            }
-            return builder.toString();
-        }
-
-        String visible = Html.fromHtml(html).toString();
-        visible = cleanText(visible);
-        return removeLikelyPageChrome(visible);
-    }
-
-    private void addRegexMatches(LinkedHashSet<String> parts, String html, String regex) {
-        Pattern pattern = Pattern.compile(regex, Pattern.DOTALL);
-        Matcher matcher = pattern.matcher(html);
-        while (matcher.find()) {
-            parts.add(matcher.group(1));
-        }
+    private String cleanTitle(String title) {
+        return cleanText(title)
+                .replace(" - ChatGPT", "")
+                .replace(" | ChatGPT", "")
+                .replace("ChatGPT - ", "")
+                .trim();
     }
 
     private String jsonUnquote(String value) {
@@ -371,30 +428,6 @@ public class MainActivity extends Activity {
                     .replace("\\u0026", "&")
                     .replaceAll("^\"|\"$", "");
         }
-    }
-
-    private String extractHtmlTitle(String html) {
-        Matcher matcher = Pattern.compile("<title[^>]*>(.*?)</title>", Pattern.CASE_INSENSITIVE | Pattern.DOTALL).matcher(html);
-        if (matcher.find()) {
-            String title = Html.fromHtml(matcher.group(1)).toString();
-            title = title.replace(" - ChatGPT", "").replace(" | ChatGPT", "");
-            return cleanText(title);
-        }
-        return "";
-    }
-
-    private boolean looksLikeConversationText(String text) {
-        if (text.length() < 20) return false;
-        String lower = text.toLowerCase(Locale.UK);
-        if (lower.contains("webpack") || lower.contains("__next") || lower.contains("manifest")) return false;
-        if (lower.startsWith("http") && text.length() < 120) return false;
-        return true;
-    }
-
-    private String removeLikelyPageChrome(String text) {
-        return text
-                .replaceAll("(?i)log in|sign up|new chat|upgrade", "")
-                .trim();
     }
 
     private void saveCurrentChatFromUi() {
