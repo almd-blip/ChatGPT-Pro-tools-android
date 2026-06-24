@@ -7,10 +7,10 @@ android {
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.secondthought.chatexporthelper.v3"
+        applicationId "com.secondthought.chatexporthelper.v4"
         minSdk 23
         targetSdk 34
-        versionCode 4
-        versionName "3.0-launch-fix"
+        versionCode 5
+        versionName "3.1-search-fix"
     }
 }
