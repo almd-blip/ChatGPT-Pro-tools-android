@@ -1,7 +1,8 @@
-name: Build Android APK from ZIP
+name: Build Android APK
 
 on:
   push:
+  pull_request:
     branches: [main, master]
   workflow_dispatch:
 
@@ -13,26 +14,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and extract project ZIP
+      - name: Show project files
         run: |
-          ZIP_FILE=$(find . -maxdepth 1 \( -name "chatgpt-pro-tools-android.zip" -o -name "chatgpt-pro-tools-android-upload-this.zip" \) -type f | head -n 1)
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERROR: Project ZIP not found in the repository root."
-            echo "Please upload chatgpt-pro-tools-android.zip or chatgpt-pro-tools-android-upload-this.zip and try again."
-            exit 1
-          fi
-
-          echo "Found ZIP: $ZIP_FILE"
-          unzip -q "$ZIP_FILE" -d ./extracted
-
-          if [ -d "./extracted/chatgpt-pro-tools-android" ]; then
-            mv ./extracted/chatgpt-pro-tools-android/* .
-            mv ./extracted/chatgpt-pro-tools-android/.[!.]* . 2>/dev/null || true
-          fi
-
-          rm -rf ./extracted
+          pwd
           ls -la
+          find . -maxdepth 3 -type f | sort
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -51,11 +37,11 @@ jobs:
         run: chmod +x gradlew
 
       - name: Build debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: chat-export-helper-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
